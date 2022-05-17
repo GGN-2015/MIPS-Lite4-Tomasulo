@@ -1,4 +1,4 @@
-// -------------------- 基于 Tomasulo 算法 和 流水线 的 MIPS-Lite4 处理器设计 -------------------- //
+// -------------------- 基于 Tomasulo 算法 的 MIPS-Lite4 处理器设计 -------------------- //
 /*
  * 学校：吉林大学
  * 作者：郭冠男
@@ -68,10 +68,10 @@ endmodule
 // -------------------- 所有执行部件以及其编号 -------------------- //
 //! 使用集中控制的方法确定哪一个部件可以输出到 CDB
 //! 当有多个部件同时想要占据 CDB 时，优先允许编号较小的部件占用 CDB
-`define DEVICE_ADDER 1 // 加减运算器
-`define DEVICE_LOGIC 2 // 逻辑运算器
-`define DEVICE_DM    3 // 数据存储器
-`define DEVICE_JMP   7 // 跳转元件
+`define DEVICE_ADDER 3'd1 // 加减运算器
+`define DEVICE_LOGIC 3'd2 // 逻辑运算器
+`define DEVICE_DM    3'd3 // 数据存储器
+`define DEVICE_JMP   3'd7 // 跳转元件
 
 
 // -------------------- 加法/逻辑 运算保留站 -------------------- //
@@ -660,7 +660,7 @@ module GPR (
     input [2 :0] cdb_device,
     input [31:0] cdb_value,
 
-    // 以下内容为输出 //! 目前我认为，此处输出不需要检查 CDB, 因为之后的元件都会检查
+    // 以下内容为输出
     output [35:0] out_readA,
     output [35:0] out_readB
 );
@@ -677,7 +677,7 @@ module GPR (
         else begin
             for(i = 1; i < `GPR_SIZE; i += 1) begin // 监听 CDB, 0号寄存器不可以写
                 if(in_launch && in_writeId == i) begin // 只有发射同时才能写寄存器
-                    registers[in_writeId] = in_writeValue; //! 此处一定要注意，此处绝对不能读 CDB
+                    registers[in_writeId] <= in_writeValue; //! 此处一定要注意，此处绝对不能读 CDB
                     //! 就算这个时刻 CDB 上有对应元件输出的数据，也不能读，因为当前指令才刚发射
                 end
                 else begin // 此处一定要记得判断 cdb_buzy
@@ -691,16 +691,278 @@ module GPR (
         end
     end
 
-    // 描述数据读取的行为
-    assign out_readA = registers[in_readIdA];
-    assign out_readB = registers[in_readIdB]; // 使用组合逻辑读取寄存器中的数据
+    // 描述数据读取的行为，保证可以在 CDB 上读取数据
+    FetchCDB U_FetchCDB_readA(
+        .cdb_buzy  (cdb_buzy  ),
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .buffer_value   (registers[in_readIdA]),
+        .buffer_newValue(out_readA)
+    );
+    FetchCDB U_FetchCDB_readB(
+        .cdb_buzy  (cdb_buzy  ),
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .buffer_value   (registers[in_readIdB]),
+        .buffer_newValue(out_readB)
+    );
+endmodule
+
+
+// -------------------- 取指令模块-------------------- //
+//! 注：PC 也要监听 CDB 中设备 DEVICE_JMP 的输出
+//! jumpState: 有指令在缓冲，JMP模块在工作，CDB 上在发送 JMP 的结果
+//! 换言之，PC 会保持在 跳转指令的下一条指令处，原指令缓冲器保持在无效状态
+`define IFU_PC_CS 32'h00003000
+`define IFU_SIZE  1024
+module IFU (
+    // 以下端口来自 CDB
+    input        cdb_buzy,
+    input [2 :0] cdb_device,
+    input [31:0] cdb_value,
+
+    // 以下端口来自控制器 //! 注意：除此之外还需要额外判断 指令寄存器 ir 为空
+    input ctrl_readIns, //! ctrl_readIns = 指令缓冲器空 && JMP模块不工作 && CDB输出设备不是IFU
+
+    // 以下端口来自计算机基本结构
+    input clk,
+    input rst,
+
+    // 以下端口来自后继设备 指令缓冲器
+    input nxt_buzy,
+
+    // 以下端口为输出
+    output reg[31:0] pc, // 下一条指令地址
+    output reg       ir_buzy,
+    output reg[31:0] ir // 当前指令的内容
+);
+    reg [31:0] instructions [0 : `IFU_SIZE - 1]; // 指令 ROM
+    initial begin
+        $readmemh("code.txt", instructions, 0, `IFU_SIZE - 1); // 从 code.txt 读取数据
+    end
+
+    always @(posedge clk) begin // PC 的寄存器逻辑
+        if(rst) pc <= `IFU_PC_CS; //? 代码段起始地址
+        else begin
+            if(cdb_buzy && cdb_device == `DEVICE_JMP) begin // PC 要从 CDB 监听 JMP 模块的数据
+                pc <= cdb_value;
+            end
+            else begin
+                if(!ir_buzy && ctrl_readIns) pc <= pc + 4; // 可以取下一条指令
+            end
+        end
+    end
+
+    always @(posedge clk) begin // ir_buzy 与 ir 的逻辑
+        if(rst) begin
+            ir_buzy <= 0;
+            ir      <= 0;
+        end
+        else begin
+            if(ir_buzy) begin
+                if(!nxt_buzy) begin // 如果后继设备（指令缓冲寄存器）不忙
+                    ir_buzy <= 0;
+                    ir      <= 0;
+                end
+            end
+            else begin // 如果当前指令缓冲寄存器里什么都没有
+                if(ctrl_readIns) begin // 如果可以读取指令
+                    ir_buzy <= 1;
+                    ir      <= instructions[pc - `IFU_PC_CS];
+                end
+            end
+        end
+    end
+endmodule
+
+
+// -------------------- MIPS-Lite3 指令集 -------------------- //
+`define FUNC_ADDU      (6'b100001)    // MIPS-Lite3
+`define FUNC_SLT       (6'b101010)
+`define FUNC_SUBU      (6'b100011)
+`define FUNC_JR        (6'b001000)
+
+`define OP_ADDI        (6'b001000)    // MIPS-Lite3 SPECIAL
+`define OP_ADDIU       (6'b001001)
+`define OP_BEQ         (6'b000100)
+`define OP_J           (6'b000010)
+`define OP_JAL         (6'b000011)
+`define OP_LUI         (6'b001111)
+`define OP_LW          (6'b100011)
+`define OP_SPECIAL     (6'b000000)
+`define OP_SW          (6'b101011)
+`define OP_ORI         (6'b001101)
+
+
+// -------------------- 译码读数电路(控制器) -------------------- //
+//! 译码读数电路的输出寄存器是指令发射缓冲寄存器
+//! Ctrl 里面包含了一个 GPR
+module Ctrl (
+    // 以下端口来自 CDB
+    input        cdb_buzy,
+    input [2 :0] cdb_device,
+    input [31:0] cdb_value,
+
+    // 以下端口来自前驱设备
+    input        ir_buzy,
+    input [31:0] ir,
+
+    // 以下端口来自计算机基本结构
+    input clk,
+    input rst,
+
+    // 以下端口来自后继设备，译码器需要通过判断后继设备是否忙从而决定指令能否发射
+    input nxt_adder_buzy,
+    input nxt_logic_buzy,
+    input nxt_dm_buzy   ,
+    input nxt_jmp_buzy  , //! 请注意，这里的 buzy 不只是 BufferIn，而是 BufferIn || BufferOut
+
+    // 以下端口为输出的所有控制信号
+    output reg        out_buzy, //! 发射前一定要判断能够发射
+    output reg        out_device,
+
+    output reg [1 :0] out_algorithm,
+    output reg [35:0] out_valueA,
+    output reg [35:0] out_valueB,
+    output reg        out_dm_write,
+    output reg        out_dm_sign,
+    output reg [15:0] out_dm_offset, // 带 dm 的输出位只会被送给输入输出缓冲站
+    output reg [35:0] out_targetAddr  //! 要么是某个寄存器的值，要么可以通过 PC+4 与常量算出
+);
+    wire dvc_avai[0:7]; // 用于检查设备是否可用
+    assign dvc_avai[0] = 0; //! 不允许使用零号设备
+    assign dvc_avai[`DEVICE_ADDER] = nxt_adder_buzy;
+    assign dvc_avai[`DEVICE_LOGIC] = nxt_logic_buzy;
+    assign dvc_avai[`DEVICE_DM   ] = nxt_dm_buzy   ;
+    assign dvc_avai[4            ] = 0;
+    assign dvc_avai[5            ] = 0;
+    assign dvc_avai[6            ] = 0;
+    assign dvc_avai[`DEVICE_JMP  ] = nxt_jmp_buzy  ;
+
+    //! 这五个端口输出到 GPR, 要记得给这五个端口赋值
+    reg        out_reg_write;      // 是否需要写寄存器
+    reg [4 :0] out_reg_writeId;    // 写哪个寄存器
+    reg [35:0] out_reg_writeValue; // 向寄存器里写什么, //! 这里的 writeValue 可能是指出设备，或者直接给出常量
+    reg [4 :0] out_reg_readIdA;
+    reg [4 :0] out_reg_readIdB;
+
+    wire   nxt_buzy;
+    assign nxt_buzy = dvc_avai[out_device]; // 将要输出到的设备是否在忙
+
+    wire [35:0] reg_readA; // 寄存器读到的数据
+    wire [35:0] reg_readB;
+
+    GPR U_GPR( // 从逻辑上讲，GPR 在指令缓冲寄存器的后面
+        .in_buzy      (out_buzy          ),
+        .in_write     (out_reg_write     ),
+        .in_writeId   (out_reg_writeId   ),
+        .in_writeValue(out_reg_writeValue), 
+        .in_readIdA   (out_reg_readIdA   ),
+        .in_readIdB   (out_reg_readIdB   ), // 任何指令都必须读两个寄存器中的值
+
+        .in_launch(out_buzy && !nxt_buzy), //! 这一瞬间指令是否能够成功发射
+
+        // 以下端口来自计算机基本结构
+        .clk(clk),
+        .rst(rst),
+
+        // 以下内容来自 cdb
+        .cdb_buzy  (cdb_buzy  ),
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+
+        // 以下内容为输出 //! 目前我认为，此处输出不需要检查 CDB //! 好了现在我不这么认为了
+        .out_readA(reg_readA),
+        .out_readB(reg_readB) //! 已经改为走 CDB，把查 CDB 写到 Ctrl 里太乱了
+    );
+
+    wire [5:0] instr; assign instr = ir[31:26]; // 指令名称 OP
+    wire [5:0] func ; assign func  = ir[5 : 0]; // special 指令函数名称
+
+    wire [15:0] imm16; assign imm16 = ir[15:0]; // 16 位立即数
+    wire [15:0] imm26; assign imm26 = ir[25:0]; // 26 位立即数
+
+    wire [4:0] rs; assign rs = ir[25:21]; // 寄存器编号
+    wire [4:0] rt; assign rt = ir[20:16];
+    wire [4:0] rd; assign rd = ir[15:11];
+
+    always @(posedge clk) begin
+        if(rst) begin
+            out_buzy       <= 0;
+            out_device     <= 0; //! 这就是为什么不允许使用零号设备
+            out_algorithm  <= 0;
+            out_algorithm  <= 0;
+            out_dm_write   <= 0;
+            out_dm_sign    <= 0;
+            out_dm_offset  <= 0;
+            out_targetAddr <= 0;
+            out_valueA     <= 0;
+            out_valueB     <= 0;
+
+            // 送到寄存器堆的数据
+            out_reg_write      <= 0;
+            out_reg_writeId    <= 0;
+            out_reg_writeValue <= 0;
+            out_reg_readIdA    <= 0;
+            out_reg_readIdB    <= 0;
+        end
+        else begin
+            if(out_buzy) begin // 如果当前设备中有数据，尝试向后继设备输出
+                if(!nxt_buzy) begin // 清空所有寄存器即可
+                    out_buzy           <= 0;
+                    out_device         <= 0;
+                    out_algorithm      <= 0;
+                    out_dm_write       <= 0;
+                    out_dm_sign        <= 0;
+                    out_dm_offset      <= 0;
+                    out_targetAddr     <= 0;
+                    out_valueA         <= 0;
+                    out_valueB         <= 0;
+                    out_reg_write      <= 0;
+                    out_reg_writeId    <= 0;
+                    out_reg_writeValue <= 0;
+                    out_reg_readIdA    <= 0;
+                    out_reg_readIdB    <= 0;
+                end
+            end
+            else begin // 如果指令缓冲寄存器当前没有数据，尝试从 ir 读入
+                if(ir_buzy) begin
+                    //! -------------------- 在此处进行指令译码 -------------------- !//
+                    case(instr)
+                        `OP_ADDI: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_ADDER;
+                            out_algorithm      <= `ADDER_ALGO_ADD;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA;
+                            out_valueB         <= {{16{imm16[15]}}, imm16}; // 按符号拓展 imm16
+                            out_reg_write      <= 1; // 需要写寄存器
+                            out_reg_writeId    <= rt; // rt = rs + sign(imm16)
+                            out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'h00000000};
+                            out_reg_readIdA    <= rs;
+                            out_reg_readIdB    <= 0;
+                        end
+                        /*
+                        OP_ADDIU   :
+                        OP_BEQ     :
+                        OP_J       :
+                        OP_JAL     :
+                        OP_LUI     :
+                        OP_LW      :
+                        OP_SPECIAL :
+                        OP_SW      :
+                        OP_ORI     :*/
+                    endcase
+                end
+            end
+        end
+    end
 endmodule
 
 
 //! -------------------- 以下内容尚未完成 -------------------- //
-
-// 取指令模块    //! 注：PC 也要监听 CDB 中设备 DEVICE_JMP 的输出
-//! jumpState: 有指令在缓冲，JMP模块在工作，CDB 上在发送 JMP 的结果
-//! 换言之，PC 会保持在 跳转指令的下一条指令处，原指令缓冲器保持在无效状态
-
 // MIPS 总电路图
+// testbench 激励文件
