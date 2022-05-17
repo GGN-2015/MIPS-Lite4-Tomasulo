@@ -843,8 +843,6 @@ module Ctrl (
     reg        out_reg_write;      // 是否需要写寄存器
     reg [4 :0] out_reg_writeId;    // 写哪个寄存器
     reg [35:0] out_reg_writeValue; // 向寄存器里写什么, //! 这里的 writeValue 可能是指出设备，或者直接给出常量
-    reg [4 :0] out_reg_readIdA;
-    reg [4 :0] out_reg_readIdB;
 
     wire   nxt_buzy;
     assign nxt_buzy = dvc_avai[out_device]; // 将要输出到的设备是否在忙
@@ -857,8 +855,8 @@ module Ctrl (
         .in_write     (out_reg_write     ),
         .in_writeId   (out_reg_writeId   ),
         .in_writeValue(out_reg_writeValue), 
-        .in_readIdA   (out_reg_readIdA   ),
-        .in_readIdB   (out_reg_readIdB   ), // 任何指令都必须读两个寄存器中的值
+        .in_readIdA   (rs),
+        .in_readIdB   (rt), // 任何指令都必须读两个寄存器中的值
 
         .in_launch(out_buzy && !nxt_buzy), //! 这一瞬间指令是否能够成功发射
 
@@ -903,8 +901,6 @@ module Ctrl (
             out_reg_write      <= 0;
             out_reg_writeId    <= 0;
             out_reg_writeValue <= 0;
-            out_reg_readIdA    <= 0;
-            out_reg_readIdB    <= 0;
         end
         else begin
             if(out_buzy) begin // 如果当前设备中有数据，尝试向后继设备输出
@@ -921,8 +917,6 @@ module Ctrl (
                     out_reg_write      <= 0;
                     out_reg_writeId    <= 0;
                     out_reg_writeValue <= 0;
-                    out_reg_readIdA    <= 0;
-                    out_reg_readIdB    <= 0;
                 end
             end
             else begin // 如果指令缓冲寄存器当前没有数据，尝试从 ir 读入
@@ -937,13 +931,11 @@ module Ctrl (
                             out_dm_sign        <= 0;
                             out_dm_offset      <= 0;
                             out_targetAddr     <= 0;
-                            out_valueA         <= reg_readA;
+                            out_valueA         <= reg_readA;                // 读寄存器是组合逻辑
                             out_valueB         <= {{16{imm16[15]}}, imm16}; // 按符号拓展 imm16
                             out_reg_write      <= 1; // 需要写寄存器
                             out_reg_writeId    <= rt; // rt = rs + sign(imm16)
                             out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'h00000000};
-                            out_reg_readIdA    <= rs;
-                            out_reg_readIdB    <= 0;
                         end
                         /*
                         OP_ADDIU   :
