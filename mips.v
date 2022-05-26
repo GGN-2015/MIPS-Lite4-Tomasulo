@@ -23,14 +23,14 @@
 
 
  //! -------------------- 待解决的问题 -------------------- !//
- //? 指令发射的同时，如果所需要使用的数据正在上 CDB，可能会错过读取机会
- //? 取指令条件：当前没有未发射的指令，当前 JMP 模块不工作，当前 CDB 上的源设备不是 JMP
+
 
 
 // -------------------- 已经解决的问题 -------------------- //
-//
+//? 指令发射的同时，如果所需要使用的数据正在上 CDB，可能会错过读取机会
+//? 取指令条件：当前没有未发射的指令，当前 JMP 模块不工作，当前 CDB 上的源设备不是 JMP
 
-`timescale 1ns/10ps
+`timescale 1ns/1ns
 
 
 // -------------------- 组合逻辑：CDB 获取模块 -------------------- //
@@ -153,6 +153,7 @@ module BufferIn (
                     out_algorithm <= in_algorithm;
                     out_valueA    <= fetchCDB_valueA; //? 此处传输已经进行了更正
                     out_valueB    <= fetchCDB_valueB;
+                    //$display("BufferIn %h get effective output (%h, %h, %h)", device_now, in_algorithm, fetchCDB_valueA, fetchCDB_valueB);
                 end
             end
         end
@@ -228,6 +229,7 @@ module AdderBufferOut (
                 if(in_buzy && in_ready) begin //! 一定要注意，未就绪的数据要在保留站中等待 CDB 广播
                     out_buzy  <= 1;
                     out_value <= adderAnswer;
+                    //$display("AdderBufferOut get effective output %h", adderAnswer);
                 end
             end
         end
@@ -346,10 +348,10 @@ module DataMemory (
 );
     // 以下寄存器为保留站寄存器
     reg [1 :0] buffer_algorithm;
-    reg [35:0] buffer_valueA;    // 基地址
-    reg [35:0] buffer_valueB;    // 将要写入的数据
-    reg        buffer_DM_write;
-    reg        buffer_DM_sign;
+    reg [35:0] buffer_valueA   ; // 基地址
+    reg [35:0] buffer_valueB   ; // 将要写入的数据
+    reg        buffer_DM_write ;
+    reg        buffer_DM_sign  ;
     reg [15:0] buffer_DM_offset; // 偏移地址
 
     //! 写内存时要求两个值都需要就绪，读内存时第二个值没有意义
@@ -391,7 +393,7 @@ module DataMemory (
                         DM[buffer_addr + 1] <= buffer_valueB[15: 8];
                         DM[buffer_addr + 2] <= buffer_valueB[23:16];
                         DM[buffer_addr + 3] <= buffer_valueB[31:24];
-                        $display("*%h = (32'h) %h", buffer_addr, buffer_valueB[31:0]);
+                        $display("%t: *%h = (32'h) %h", $time, buffer_addr, buffer_valueB[31:0]);
                     end
                 endcase
             end
@@ -458,6 +460,7 @@ module DataMemory (
                     buffer_DM_write  <= in_DM_write;
                     buffer_DM_sign   <= in_DM_sign;
                     buffer_DM_offset <= in_DM_offset;
+                    $display("%t: dm get bufferin %h %h (%h %h)", $time, fetchCDB_valueA, fetchCDB_valueB, in_valueA, in_valueB);
                 end
             end
         end
@@ -472,7 +475,7 @@ module DataMemory (
         end
         else begin
             if(!out_buzy) begin // 如果现在不忙，试图从缓冲站读入数据
-                if(buffer_buzy && buffer_ready) begin
+                if(buffer_buzy && buffer_ready && !buffer_DM_write) begin //! Save 命令不上 CDB
                     out_buzy  <= 1;
                     case(buffer_algorithm) //! 通过地址读出值，相当于组合逻辑电路
                         `DM_ALGO_BYTE: begin
@@ -533,8 +536,8 @@ module Jmp (
     // 输出端口
     output reg        buffer_buzy,
     output reg        out_buzy,    // 暂存器是否要输出 //! 一定要注意，设备能接受输入的条件是保留站中没有元素
-    output reg [2 :0] out_device,  // 存储器的设备号
-    output reg [31:0] out_value    // 存储器中读取的数据
+    output reg [2 :0] out_device,  // 跳转元件的设备号
+    output reg [31:0] out_value    // 跳转元件输出的数据
 );
     //! 类似存储器，内置了一个保留站
     reg [35:0] buffer_targetAddr;
@@ -601,6 +604,7 @@ module Jmp (
                     buffer_algorithm  <= in_algorithm;
                     buffer_valueA     <= fetchCDB_valueA;
                     buffer_valueB     <= fetchCDB_valueB; //? 此处赋值已更正
+                    $display("%t: jmp buffer in get %h %h %h", $time, fetchCDB_targetAddr, fetchCDB_valueA, fetchCDB_valueB);
                 end
             end 
         end
@@ -617,6 +621,8 @@ module Jmp (
                 if(!cdb_buzy && !dvc_adder_buzy && !dvc_logic_buzy && !dvc_memory_buzy) begin // 没人想抢占才不忙
                     out_buzy  <= 0;
                     out_value <= 0;
+                    $display("%t: clear jmp out buffer", $time);
+                    //$stop();
                 end
             end
             else begin // 还没有准备好，试图从保留站输入
@@ -681,7 +687,7 @@ module GPR (
             for(i = 1; i < `GPR_SIZE; i += 1) begin // 监听 CDB, 0号寄存器不可以写
                 if(in_launch && in_writeId == i) begin // 只有发射同时才能写寄存器
                     registers[in_writeId] <= in_writeValue; //! 此处一定要注意，此处绝对不能读 CDB
-                    $display("$%h = (CTRL) %h", in_writeId, in_writeValue);
+                    $display("%t: $%h = (CTRL) %h", $time, in_writeId, in_writeValue);
                     //! 就算这个时刻 CDB 上有对应元件输出的数据，也不能读，因为当前指令才刚发射
                 end
                 else begin // 此处一定要记得判断 cdb_buzy
@@ -689,7 +695,7 @@ module GPR (
                         registers[i][35]    <= 1;
                         registers[i][34:32] <= 0;
                         registers[i][31: 0] <= cdb_value;
-                        $display("$%h = (CDB) %h", i, registers[i]);
+                        $display("%t: $%h = (CDB) %h", $time, i, cdb_value);
                     end
                 end
             end
@@ -753,10 +759,15 @@ module IFU (
                 pc <= cdb_value;
             end
             else begin
-                if(!ir_buzy && ctrl_readIns) pc <= pc + 4; // 可以取下一条指令
+                if(!ir_buzy && ctrl_readIns) begin 
+                    pc <= pc + 4; // 可以取下一条指令
+                end
             end
         end
     end
+
+    wire [9:0] ins_addr;
+    assign ins_addr = pc[11:2];
 
     always @(posedge clk) begin // ir_buzy 与 ir 的逻辑
         if(rst) begin
@@ -773,10 +784,13 @@ module IFU (
             else begin // 如果当前指令缓冲寄存器里什么都没有
                 if(ctrl_readIns) begin // 如果可以读取指令
                     ir_buzy <= 1;
-                    ir      <= instructions[pc - `IFU_PC_CS];
-                    if(ir === 32'hxxxxxxxx) begin //! 寻找程序的结束位置
-                        $display("program fall off the end");
-                        $finish;
+                    ir      <= instructions[ins_addr];
+                    if(instructions[ins_addr] === 32'hxxxxxxxx) begin //! 寻找程序的结束位置
+                        $display("%t: program fall off the end, pc = %h", $time, pc);
+                        #20 $finish;
+                    end
+                    else begin
+                        $display("%t: ir = %h, pc = %h", $time, instructions[ins_addr], pc);
                     end
                 end
             end
@@ -864,7 +878,7 @@ module Ctrl (
     wire [5:0] func ; assign func  = ir[5 : 0]; // special 指令函数名称
 
     wire [15:0] imm16; assign imm16 = ir[15:0]; // 16 位立即数
-    wire [15:0] imm26; assign imm26 = ir[25:0]; // 26 位立即数
+    wire [25:0] imm26; assign imm26 = ir[25:0]; // 26 位立即数
 
     wire [4:0] rs; assign rs = ir[25:21]; // 寄存器编号
     wire [4:0] rt; assign rt = ir[20:16];
@@ -893,6 +907,9 @@ module Ctrl (
         .out_readA(reg_readA),
         .out_readB(reg_readB) //! 已经改为走 CDB，把查 CDB 写到 Ctrl 里太乱了
     );
+
+    wire [31:0] getTargetAddr;
+    assign getTargetAddr = pc + {{14{imm16[15]}}, imm16, 2'b00};
 
     always @(posedge clk) begin
         if(rst) begin
@@ -967,7 +984,7 @@ module Ctrl (
                             out_dm_offset      <= 0;
                             out_targetAddr     <= 0;
                             out_valueA         <= reg_readA;                // 读寄存器是组合逻辑
-                            out_valueB         <= {{16{imm16[15]}}, imm16}; // 按符号拓展 imm16
+                            out_valueB         <= {1'b1, 3'b0, {16{imm16[15]}}, imm16}; // 按符号拓展 imm16
                             out_reg_write      <= 1;                        // 需要写寄存器
                             out_reg_writeId    <= rt;                       // rt = rs + sign(imm16)
                             out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'h00000000};
@@ -981,7 +998,7 @@ module Ctrl (
                             out_dm_offset      <= 0;
                             out_targetAddr     <= 0;
                             out_valueA         <= reg_readA;                // 读寄存器是组合逻辑
-                            out_valueB         <= {{16{imm16[15]}}, imm16}; // 按符号拓展 imm16
+                            out_valueB         <= {1'b1, 3'd0, {16{imm16[15]}}, imm16}; // 按符号拓展 imm16
                             out_reg_write      <= 1;                        // 需要写寄存器
                             out_reg_writeId    <= rt;                       // rt = rs + sign(imm16)
                             out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'h00000000};
@@ -993,7 +1010,7 @@ module Ctrl (
                             out_dm_write       <= 0;
                             out_dm_sign        <= 0;
                             out_dm_offset      <= 0; // beq 不写数据存储器
-                            out_targetAddr     <= pc + {{14{imm16[15]}}, imm16, 2'b00}; // 此时 pc 的值就是 pc+4
+                            out_targetAddr     <= {1'b1, 3'd0, getTargetAddr}; // 此时 pc 的值就是 pc+4
                             out_valueA         <= reg_readA;
                             out_valueB         <= reg_readB; // BEQ 有两个操作数
                             out_reg_write      <= 0;
@@ -1007,7 +1024,7 @@ module Ctrl (
                             out_dm_write       <= 0;
                             out_dm_sign        <= 0;
                             out_dm_offset      <= 0;
-                            out_targetAddr     <= {pc[31:28], imm26, 2'b00}; // TODO: 疑问：这里用 pc+4 的高 4 位是否会出现问题
+                            out_targetAddr     <= {1'b1, 3'd0, pc[31:28], imm26, 2'b00}; // TODO: 疑问：这里用 pc+4 的高 4 位是否会出现问题
                             out_valueA         <= 0;
                             out_valueB         <= 0; // J 没有操作数
                             out_reg_write      <= 0;
@@ -1021,7 +1038,7 @@ module Ctrl (
                             out_dm_write       <= 0;
                             out_dm_sign        <= 0;
                             out_dm_offset      <= 0;
-                            out_targetAddr     <= {pc[31:28], imm26, 2'b00}; // TODO: 疑问：这里用 pc+4 的高 4 位是否会出现问题
+                            out_targetAddr     <= {1'b1, 3'd0, pc[31:28], imm26, 2'b00}; // TODO: 疑问：这里用 pc+4 的高 4 位是否会出现问题
                             out_valueA         <= 0;
                             out_valueB         <= 0; // JAL 没有操作数
                             out_reg_write      <= 1;
@@ -1041,7 +1058,7 @@ module Ctrl (
                             out_valueB         <= 0;
                             out_reg_write      <= 1; // 立即数加载至高位
                             out_reg_writeId    <= rt;
-                            out_reg_writeValue <= {imm16, 16'd0}; // 低位填零
+                            out_reg_writeValue <= {1'b1, 3'd0, imm16, 16'd0}; // 低位填零
                         end
                         `OP_LW: begin
                             out_buzy           <= 1;
@@ -1049,7 +1066,7 @@ module Ctrl (
                             out_algorithm      <= `DM_ALGO_WORD;
                             out_dm_write       <= 0;
                             out_dm_sign        <= 0;
-                            out_dm_offset      <= {{16{imm16[15]}}, imm16}; // 带符号拓展的 16 位立即数
+                            out_dm_offset      <= imm16; // 16 位立即数
                             out_targetAddr     <= 0;
                             out_valueA         <= reg_readA; // 基地址 base = rs
                             out_valueB         <= 0; // 不写入，不需要 valueB
@@ -1123,18 +1140,29 @@ module Ctrl (
                             out_algorithm      <= `DM_ALGO_WORD;
                             out_dm_write       <= 1;
                             out_dm_sign        <= 0;
-                            out_dm_offset      <= {{16{imm16[15]}}, imm16};
-                            out_targetAddr     <= reg_readA;
-                            out_valueA         <= 0;
-                            out_valueB         <= 0;
+                            out_dm_offset      <= imm16;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA;
+                            out_valueB         <= reg_readB;
                             out_reg_write      <= 0;
                             out_reg_writeId    <= 0;
                             out_reg_writeValue <= 0;
                         end
-                        // TODO: 在此处添加未完成译码的指令
                         `OP_ORI: begin
-                            
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_LOGIC;
+                            out_algorithm      <= `LOGIC_ALGO_OR;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // rs
+                            out_valueB         <= {1'b1, 3'd0, 16'd0, imm16}; // 无符号拓展
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {1'b0, `DEVICE_LOGIC, 32'd0}; // 等待 Logic 的输出
                         end
+                        // TODO: 在此处添加未完成译码的指令
                         default: begin
                             out_buzy <= 0; // 译码失败，不发射指令
                         end
@@ -1194,21 +1222,29 @@ module Cdb (
                     out_buzy   <= 1;
                     out_device <= adder_device;
                     out_value  <= adder_value;
+                    $display("%t: adder to CDB %h", $time, adder_value);
+                    //$stop();
                 end else
                 if(logic_buzy) begin
                     out_buzy   <= 1;
                     out_device <= logic_device;
                     out_value  <= logic_value;
+                    $display("%t: logic to CDB %h", $time, logic_value);
+                    //$stop();
                 end else
                 if(dm_buzy) begin
                     out_buzy   <= 1;
                     out_device <= dm_device;
                     out_value  <= dm_value;
+                    $display("%t: dm to CDB %h", $time, dm_value);
+                    //$stop();
                 end else
                 if(jmp_buzy) begin
                     out_buzy   <= 1;
                     out_device <= jmp_device;
                     out_value  <= jmp_value;
+                    $display("%t: jmp to CDB %h", $time, jmp_value);
+                    //$stop();
                 end
             end
         end
@@ -1466,7 +1502,7 @@ module tb_mips;
     //输出波形
     initial begin
         $dumpfile("MIPS.vcd");
-        $dumpvars(0, tb_BufferIn);
+        $dumpvars(0, tb_mips);
     end
 
     initial begin
@@ -1475,131 +1511,6 @@ module tb_mips;
         #2 rst = 0; // 清空并开始执行
     end
 endmodule
-
-
-module tb_FetchCDB;
-    reg         cdb_buzy       ;
-    reg  [2 :0] cdb_device     ;
-    reg  [31:0] cdb_value      ;
-    reg  [35:0] buffer_value   ;
-    wire [35:0] buffer_newValue;
-
-    // 测试 FetchCDB 能否按照预期工作
-    FetchCDB U_FetchCDB(
-        .cdb_buzy        (cdb_buzy       ),
-        .cdb_device      (cdb_device     ),
-        .cdb_value       (cdb_value      ),
-        .buffer_value    (buffer_value   ),
-        .buffer_newValue (buffer_newValue)
-    );
-
-    // 输出波形
-    // initial begin
-    //     $dumpfile("FetchCDB.vcd");
-    //     $dumpvars(0, tb_FetchCDB);
-    // end
-
-    // 测试逻辑
-    initial begin
-        cdb_buzy     = 1;            // CDB 上 JMP 正在输出
-        cdb_device   = `DEVICE_JMP ; //
-        cdb_value    = 32'h12345678; // 输出 12345678H
-        buffer_value = {1'b0, `DEVICE_ADDER, 32'h00000000}; // 未就绪，设备不是我的
-        #20;
-        buffer_value = {1'b0, `DEVICE_JMP, 32'h00000000};   // 未就绪，设备是我的
-        #20;
-        buffer_value = {1'b1, `DEVICE_JMP, 32'h87654321};   // 已就绪，设备是我的
-        #20 $finish;
-    end
-endmodule
-
-
-module tb_BufferIn; // 对 BufferIn 模块进行测试
-    reg        in_hasInput ;
-    reg [2 :0] in_device   ;
-    reg [1 :0] in_algorithm;
-    reg [35:0] in_valueA   ;
-    reg [35:0] in_valueB   ;
-
-    reg        cdb_buzy  ;
-    reg [2 :0] cdb_device;
-    reg [31:0] cdb_value ;
-
-    reg clk, rst;
-    reg nxt_buzy;
-
-    wire        out_buzy     ;
-    wire        out_ready    ;
-    wire [1 :0] out_algorithm;
-    wire [35:0] out_valueA   ;
-    wire [35:0] out_valueB   ;
-
-    //输出波形
-    // initial begin
-    //     $dumpfile("BufferIn.vcd");
-    //     $dumpvars(0, tb_BufferIn);
-    // end
-
-    // 假设这是一个加法缓冲器
-    BufferIn U_BufferIn(
-        .in_hasInput  (in_hasInput ),
-        .in_device    (in_device   ),
-        .in_algorithm (in_algorithm),
-        .in_valueA    (in_valueA   ),
-        .in_valueB    (in_valueB   ),
-
-        .device_now(`DEVICE_ADDER),  //? 这个端口一定从常数输入
-        
-        .cdb_buzy  (cdb_buzy  ),
-        .cdb_device(cdb_device),
-        .cdb_value (cdb_value ),
-
-        .clk(clk),
-        .rst(rst),
-
-        .nxt_buzy(nxt_buzy),
-
-        .out_buzy     (out_buzy     ),
-        .out_ready    (out_ready    ),
-        .out_algorithm(out_algorithm),
-        .out_valueA   (out_valueA   ),
-        .out_valueB   (out_valueB   )
-    );
-
-    initial clk = 0;
-    always #1 clk = ~clk; // 设置时钟
-
-    initial begin
-        rst = 1;
-        #2 rst = 0; // 清空
-        #2;
-
-        in_hasInput  = 1;
-        in_device    = `DEVICE_LOGIC; // 不是输入到这个设备的
-        in_algorithm = `ADDER_ALGO_ADD;
-        in_valueA    = {1'b0, `DEVICE_DM, 32'd0};
-        in_valueB    = {1'b1, 3'd0, 32'd12345678};
-
-        cdb_buzy   = 0;
-        cdb_device = `DEVICE_DM;
-        cdb_value  = 87654321;
-
-        nxt_buzy = 1; // 由于设备不对，什么都不做
-        #2;
-        in_device = `DEVICE_ADDER; // 设备改对后读入指令
-        #2;
-        in_hasInput = 0; // 等待一个周期
-        #2;
-        cdb_buzy = 1; // 读入就绪的数据
-        #2;
-        cdb_buzy = 0; // 等待一个周期
-        #2;
-        nxt_buzy = 0; // 可以输出后，清空数据
-        #2;
-        #2 $finish;
-    end
-endmodule
-
 
 //! -------------------- 以下内容尚未完成 -------------------- //
 // testbench 激励文件
