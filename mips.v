@@ -381,12 +381,12 @@ module DataMemory (
                 case(buffer_algorithm)
                     `DM_ALGO_BYTE: begin
                         DM[buffer_addr + 0] <= buffer_valueB[7:0];
-                        $display("*%h = (8'h) %h", buffer_addr, buffer_valueB[7:0]);
+                        $display("%t: *%h = (8'h) %h", $time, buffer_addr, buffer_valueB[7:0]);
                     end
                     `DM_ALGO_HALF: begin
                         DM[buffer_addr + 0] <= buffer_valueB[7 :0];
                         DM[buffer_addr + 1] <= buffer_valueB[15:8];
-                        $display("*%h = (16'h) %h", buffer_addr, buffer_valueB[15:0]);
+                        $display("%t: *%h = (16'h) %h", $time, buffer_addr, buffer_valueB[15:0]);
                     end
                     `DM_ALGO_WORD: begin
                         DM[buffer_addr + 0] <= buffer_valueB[7 : 0];
@@ -817,6 +817,16 @@ endmodule
 `define OP_ORI         (6'b001101)
 
 
+// -------------------- MIPS-Lite4 指令集扩充 -------------------- //
+`define OP_LB   (6'b100000)
+`define OP_LBU  (6'b100100)
+`define OP_LH   (6'b100001)
+`define OP_LHU  (6'b100101)
+`define OP_SB   (6'b101000)
+`define OP_SH   (6'b101001)
+`define OP_SLTI (6'b001010)
+
+
 // -------------------- 译码读数电路(控制器) -------------------- //
 //! 译码读数电路的输出寄存器是指令发射缓冲寄存器
 //! Ctrl 里面包含了一个 GPR
@@ -1161,6 +1171,105 @@ module Ctrl (
                             out_reg_write      <= 1;
                             out_reg_writeId    <= rt;
                             out_reg_writeValue <= {1'b0, `DEVICE_LOGIC, 32'd0}; // 等待 Logic 的输出
+                        end
+                        // -------------------- MIPS-Lite4 extra -------------------- //
+                        `OP_LB: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_BYTE;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 1;     // 带符号拓展
+                            out_dm_offset      <= imm16; // 16 位立即数
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // 基地址 base = rs
+                            out_valueB         <= 0; // 不写入，不需要 valueB
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {1'b0, `DEVICE_DM, 32'd0}; // 等待 DM 的输出
+                        end
+                        `OP_LBU: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_BYTE;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;     // 不带符号拓展
+                            out_dm_offset      <= imm16; // 16 位立即数
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // 基地址 base = rs
+                            out_valueB         <= 0; // 不写入，不需要 valueB
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {1'b0, `DEVICE_DM, 32'd0}; // 等待 DM 的输出
+                        end 
+                        `OP_LH: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_HALF;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 1;     // 带符号拓展
+                            out_dm_offset      <= imm16; // 16 位立即数
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // 基地址 base = rs
+                            out_valueB         <= 0; // 不写入，不需要 valueB
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {1'b0, `DEVICE_DM, 32'd0}; // 等待 DM 的输出
+                        end
+                        `OP_LHU: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_HALF;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;     // 不带符号拓展
+                            out_dm_offset      <= imm16; // 16 位立即数
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // 基地址 base = rs
+                            out_valueB         <= 0; // 不写入，不需要 valueB
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {1'b0, `DEVICE_DM, 32'd0}; // 等待 DM 的输出
+                        end
+                        `OP_SB: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_BYTE;
+                            out_dm_write       <= 1;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= imm16;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA;
+                            out_valueB         <= reg_readB;
+                            out_reg_write      <= 0;
+                            out_reg_writeId    <= 0;
+                            out_reg_writeValue <= 0;
+                        end  
+                        `OP_SH: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_HALF;
+                            out_dm_write       <= 1;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= imm16;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA;
+                            out_valueB         <= reg_readB;
+                            out_reg_write      <= 0;
+                            out_reg_writeId    <= 0;
+                            out_reg_writeValue <= 0;
+                        end
+                        `OP_SLTI: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_ADDER;
+                            out_algorithm      <= `ADDER_ALGO_SLT;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // rs
+                            out_valueB         <= {1'b1, 3'd0, {16{imm16[15]}},imm16}; // imm
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt; // rt = rs < imm16
+                            out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'd0}; // 等待 Adder 的输出
                         end
                         // TODO: 在此处添加未完成译码的指令
                         default: begin
