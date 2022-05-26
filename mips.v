@@ -58,7 +58,7 @@ module FetchCDB (
                 buffer_newValue[31: 0] = cdb_value;
             end
             else begin // cdb 输出的不是我想要读取的
-                buffer_newValue <= buffer_value;
+                buffer_newValue = buffer_value;
             end
         end
     end
@@ -86,8 +86,8 @@ module BufferIn (
     input[35:0] in_valueA,    // 左源操作数
     input[35:0] in_valueB,    // 右源操作数
 
-    //! device_now 用来描述当前保留站是哪个执行部件的缓冲站
-    input[2 : 0] device_now,  //? 这个端口一定从常数输入
+    //! device_now 用来描述当前保留站是哪个执行部件的缓冲站, 可能为 加法(1)/逻辑(2)
+    input[2 :0] device_now,  //? 这个端口一定从常数输入
     
     // 以下三个端口数据来自 CDB(通用数据总线)
     input       cdb_buzy,    // CDB 忙
@@ -161,14 +161,14 @@ endmodule
 
 
 // -------------------- 加法器算法合集 -------------------- //
-`define ADDER_ALGO_NOP 0 // 直传
-`define ADDER_ALGO_ADD 1 // 加法
-`define ADDER_ALGO_SUB 2 // 减法
-`define ADDER_ALGO_SLT 3 // 比较
+`define ADDER_ALGO_NOP 2'd0 // 直传
+`define ADDER_ALGO_ADD 2'd1 // 加法
+`define ADDER_ALGO_SUB 2'd2 // 减法
+`define ADDER_ALGO_SLT 2'd3 // 比较
 
 
 // -------------------- 加法器组合逻辑 -------------------- //
-module AdderComb (
+module AdderComb ( //! 此模块只在 AdderBufferOut 模块中被使用
     input      [31:0] in_valueA,
     input      [31:0] in_valueB,
     input      [1 :0] in_algorithm,
@@ -204,7 +204,7 @@ module AdderBufferOut (
 
     // 输出端口
     output reg        out_buzy,   // 保留站是否忙
-    output reg [2 :0] out_device, // 加法器设备编号
+    output reg [2 :0] out_device, //! 一定是加法器的设备编号
     output reg [31:0] out_value   // 加法器结果
 );
     //! 在未来的版本可能会在此处增加对溢出的处理
@@ -379,16 +379,19 @@ module DataMemory (
                 case(buffer_algorithm)
                     `DM_ALGO_BYTE: begin
                         DM[buffer_addr + 0] <= buffer_valueB[7:0];
+                        $display("*%h = (8'h) %h", buffer_addr, buffer_valueB[7:0]);
                     end
                     `DM_ALGO_HALF: begin
                         DM[buffer_addr + 0] <= buffer_valueB[7 :0];
                         DM[buffer_addr + 1] <= buffer_valueB[15:8];
+                        $display("*%h = (16'h) %h", buffer_addr, buffer_valueB[15:0]);
                     end
                     `DM_ALGO_WORD: begin
                         DM[buffer_addr + 0] <= buffer_valueB[7 : 0];
                         DM[buffer_addr + 1] <= buffer_valueB[15: 8];
                         DM[buffer_addr + 2] <= buffer_valueB[23:16];
                         DM[buffer_addr + 3] <= buffer_valueB[31:24];
+                        $display("*%h = (32'h) %h", buffer_addr, buffer_valueB[31:0]);
                     end
                 endcase
             end
@@ -678,6 +681,7 @@ module GPR (
             for(i = 1; i < `GPR_SIZE; i += 1) begin // 监听 CDB, 0号寄存器不可以写
                 if(in_launch && in_writeId == i) begin // 只有发射同时才能写寄存器
                     registers[in_writeId] <= in_writeValue; //! 此处一定要注意，此处绝对不能读 CDB
+                    $display("$%h = (CTRL) %h", in_writeId, in_writeValue);
                     //! 就算这个时刻 CDB 上有对应元件输出的数据，也不能读，因为当前指令才刚发射
                 end
                 else begin // 此处一定要记得判断 cdb_buzy
@@ -685,6 +689,7 @@ module GPR (
                         registers[i][35]    <= 1;
                         registers[i][34:32] <= 0;
                         registers[i][31: 0] <= cdb_value;
+                        $display("$%h = (CDB) %h", i, registers[i]);
                     end
                 end
             end
@@ -738,7 +743,7 @@ module IFU (
 );
     reg [31:0] instructions [0 : `IFU_SIZE - 1]; // 指令 ROM
     initial begin
-        $readmemh("code.txt", instructions, 0, `IFU_SIZE - 1); // 从 code.txt 读取数据
+        $readmemh("code.txt", instructions, 0, `IFU_SIZE - 1); // 从 code.txt 读取数据 //! 结尾数据为 X
     end
 
     always @(posedge clk) begin // PC 的寄存器逻辑
@@ -769,6 +774,10 @@ module IFU (
                 if(ctrl_readIns) begin // 如果可以读取指令
                     ir_buzy <= 1;
                     ir      <= instructions[pc - `IFU_PC_CS];
+                    if(ir === 32'hxxxxxxxx) begin //! 寻找程序的结束位置
+                        $display("program fall off the end");
+                        $finish;
+                    end
                 end
             end
         end
@@ -804,6 +813,7 @@ module Ctrl (
     input [31:0] cdb_value,
 
     // 以下端口来自前驱设备
+    input [31:0] pc, //! 有些运算需要使用 pc+4 的值
     input        ir_buzy,
     input [31:0] ir,
 
@@ -819,7 +829,7 @@ module Ctrl (
 
     // 以下端口为输出的所有控制信号
     output reg        out_buzy, //! 发射前一定要判断能够发射
-    output reg        out_device,
+    output reg [2 :0] out_device,
 
     output reg [1 :0] out_algorithm,
     output reg [35:0] out_valueA,
@@ -850,13 +860,23 @@ module Ctrl (
     wire [35:0] reg_readA; // 寄存器读到的数据
     wire [35:0] reg_readB;
 
+    wire [5:0] instr; assign instr = ir[31:26]; // 指令名称 OP
+    wire [5:0] func ; assign func  = ir[5 : 0]; // special 指令函数名称
+
+    wire [15:0] imm16; assign imm16 = ir[15:0]; // 16 位立即数
+    wire [15:0] imm26; assign imm26 = ir[25:0]; // 26 位立即数
+
+    wire [4:0] rs; assign rs = ir[25:21]; // 寄存器编号
+    wire [4:0] rt; assign rt = ir[20:16];
+    wire [4:0] rd; assign rd = ir[15:11];
+
     GPR U_GPR( // 从逻辑上讲，GPR 在指令缓冲寄存器的后面
         .in_buzy      (out_buzy          ),
         .in_write     (out_reg_write     ),
         .in_writeId   (out_reg_writeId   ),
         .in_writeValue(out_reg_writeValue), 
         .in_readIdA   (rs),
-        .in_readIdB   (rt), // 任何指令都必须读两个寄存器中的值
+        .in_readIdB   (rt), // 任何指令都必须读两个寄存器 (rs, rt) 中的值
 
         .in_launch(out_buzy && !nxt_buzy), //! 这一瞬间指令是否能够成功发射
 
@@ -873,16 +893,6 @@ module Ctrl (
         .out_readA(reg_readA),
         .out_readB(reg_readB) //! 已经改为走 CDB，把查 CDB 写到 Ctrl 里太乱了
     );
-
-    wire [5:0] instr; assign instr = ir[31:26]; // 指令名称 OP
-    wire [5:0] func ; assign func  = ir[5 : 0]; // special 指令函数名称
-
-    wire [15:0] imm16; assign imm16 = ir[15:0]; // 16 位立即数
-    wire [15:0] imm26; assign imm26 = ir[25:0]; // 26 位立即数
-
-    wire [4:0] rs; assign rs = ir[25:21]; // 寄存器编号
-    wire [4:0] rt; assign rt = ir[20:16];
-    wire [4:0] rd; assign rd = ir[15:11];
 
     always @(posedge clk) begin
         if(rst) begin
@@ -918,11 +928,36 @@ module Ctrl (
                     out_reg_writeId    <= 0;
                     out_reg_writeValue <= 0;
                 end
+                else begin //! 指令在未发射的时候，也可能等待到 CDB 的数据
+                    if(cdb_buzy) begin
+                        if(!out_targetAddr[35] && cdb_device == out_targetAddr[34:32]) begin
+                            out_targetAddr[35]    <= 1;
+                            out_targetAddr[34:32] <= 0;
+                            out_targetAddr[31: 0] <= cdb_value;
+                        end
+                        if(!out_valueA[35] && cdb_device == out_valueA[34:32]) begin
+                            out_valueA[35]    <= 1;
+                            out_valueA[34:32] <= 0;
+                            out_valueA[31: 0] <= cdb_value;
+                        end
+                        if(!out_valueB[35] && cdb_device == out_valueB[34:32]) begin
+                            out_valueB[35]    <= 1;
+                            out_valueB[34:32] <= 0;
+                            out_valueB[31: 0] <= cdb_value;
+                        end
+                        if(!out_reg_writeValue[35] && cdb_device == out_reg_writeValue[34:32]) begin
+                            out_reg_writeValue[35]    <= 1;
+                            out_reg_writeValue[34:32] <= 0;
+                            out_reg_writeValue[31: 0] <= cdb_value;
+                        end
+                    end
+                end
             end
             else begin // 如果指令缓冲寄存器当前没有数据，尝试从 ir 读入
                 if(ir_buzy) begin
                     //! -------------------- 在此处进行指令译码 -------------------- !//
                     case(instr)
+                        // -------------------- MIPS-Lite3 -------------------- //
                         `OP_ADDI: begin
                             out_buzy           <= 1;
                             out_device         <= `DEVICE_ADDER;
@@ -933,20 +968,176 @@ module Ctrl (
                             out_targetAddr     <= 0;
                             out_valueA         <= reg_readA;                // 读寄存器是组合逻辑
                             out_valueB         <= {{16{imm16[15]}}, imm16}; // 按符号拓展 imm16
-                            out_reg_write      <= 1; // 需要写寄存器
-                            out_reg_writeId    <= rt; // rt = rs + sign(imm16)
+                            out_reg_write      <= 1;                        // 需要写寄存器
+                            out_reg_writeId    <= rt;                       // rt = rs + sign(imm16)
                             out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'h00000000};
                         end
-                        /*
-                        OP_ADDIU   :
-                        OP_BEQ     :
-                        OP_J       :
-                        OP_JAL     :
-                        OP_LUI     :
-                        OP_LW      :
-                        OP_SPECIAL :
-                        OP_SW      :
-                        OP_ORI     :*/
+                        `OP_ADDIU: begin //! 不考虑溢出，ADDIU 与 ADDI 等价
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_ADDER;
+                            out_algorithm      <= `ADDER_ALGO_ADD;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA;                // 读寄存器是组合逻辑
+                            out_valueB         <= {{16{imm16[15]}}, imm16}; // 按符号拓展 imm16
+                            out_reg_write      <= 1;                        // 需要写寄存器
+                            out_reg_writeId    <= rt;                       // rt = rs + sign(imm16)
+                            out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'h00000000};
+                        end
+                        `OP_BEQ: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_JMP;
+                            out_algorithm      <= `JMP_ALGO_BEQ;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0; // beq 不写数据存储器
+                            out_targetAddr     <= pc + {{14{imm16[15]}}, imm16, 2'b00}; // 此时 pc 的值就是 pc+4
+                            out_valueA         <= reg_readA;
+                            out_valueB         <= reg_readB; // BEQ 有两个操作数
+                            out_reg_write      <= 0;
+                            out_reg_writeId    <= 0;
+                            out_reg_writeValue <= 0; // BEQ 不写寄存器堆
+                        end
+                        `OP_J: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_JMP;
+                            out_algorithm      <= `JMP_ALGO_JMP;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= {pc[31:28], imm26, 2'b00}; // TODO: 疑问：这里用 pc+4 的高 4 位是否会出现问题
+                            out_valueA         <= 0;
+                            out_valueB         <= 0; // J 没有操作数
+                            out_reg_write      <= 0;
+                            out_reg_writeId    <= 0;
+                            out_reg_writeValue <= 0; // J 不写寄存器堆
+                        end
+                        `OP_JAL: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_JMP;
+                            out_algorithm      <= `JMP_ALGO_JMP;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= {pc[31:28], imm26, 2'b00}; // TODO: 疑问：这里用 pc+4 的高 4 位是否会出现问题
+                            out_valueA         <= 0;
+                            out_valueB         <= 0; // JAL 没有操作数
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= 31;
+                            out_reg_writeValue <= {1'b1, 3'b000, pc}; // J 写寄存器堆，写入返回地址
+                            //! 向 31 号寄存器写入一个就绪值
+                        end
+                        `OP_LUI: begin
+                            out_buzy           <= 1;
+                            out_device         <= 0; // 只调用 GPR，不需要执行阶段
+                            out_algorithm      <= 0;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= 0;
+                            out_targetAddr     <= 0;
+                            out_valueA         <= 0;
+                            out_valueB         <= 0;
+                            out_reg_write      <= 1; // 立即数加载至高位
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {imm16, 16'd0}; // 低位填零
+                        end
+                        `OP_LW: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_WORD;
+                            out_dm_write       <= 0;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= {{16{imm16[15]}}, imm16}; // 带符号拓展的 16 位立即数
+                            out_targetAddr     <= 0;
+                            out_valueA         <= reg_readA; // 基地址 base = rs
+                            out_valueB         <= 0; // 不写入，不需要 valueB
+                            out_reg_write      <= 1;
+                            out_reg_writeId    <= rt;
+                            out_reg_writeValue <= {1'b0, `DEVICE_DM, 32'd0}; // 等待 DM 的输出
+                        end
+                        `OP_SPECIAL: begin
+                            case(func)
+                                `FUNC_ADDU: begin
+                                    out_buzy           <= 1;
+                                    out_device         <= `DEVICE_ADDER;
+                                    out_algorithm      <= `ADDER_ALGO_ADD;
+                                    out_dm_write       <= 0;
+                                    out_dm_sign        <= 0;
+                                    out_dm_offset      <= 0;
+                                    out_targetAddr     <= 0;
+                                    out_valueA         <= reg_readA; // rs
+                                    out_valueB         <= reg_readB; // rt
+                                    out_reg_write      <= 1;
+                                    out_reg_writeId    <= rd; // rd = rs + rt
+                                    out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'd0}; // 等待 Adder 的输出
+                                end
+                                `FUNC_SLT: begin
+                                    out_buzy           <= 1;
+                                    out_device         <= `DEVICE_ADDER;
+                                    out_algorithm      <= `ADDER_ALGO_SLT;
+                                    out_dm_write       <= 0;
+                                    out_dm_sign        <= 0;
+                                    out_dm_offset      <= 0;
+                                    out_targetAddr     <= 0;
+                                    out_valueA         <= reg_readA; // rs
+                                    out_valueB         <= reg_readB; // rt
+                                    out_reg_write      <= 1;
+                                    out_reg_writeId    <= rd; // rd = rs < rt
+                                    out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'd0}; // 等待 Adder 的输出
+                                end
+                                `FUNC_SUBU: begin
+                                    out_buzy           <= 1;
+                                    out_device         <= `DEVICE_ADDER;
+                                    out_algorithm      <= `ADDER_ALGO_SUB;
+                                    out_dm_write       <= 0;
+                                    out_dm_sign        <= 0;
+                                    out_dm_offset      <= 0;
+                                    out_targetAddr     <= 0;
+                                    out_valueA         <= reg_readA; // rs
+                                    out_valueB         <= reg_readB; // rt
+                                    out_reg_write      <= 1;
+                                    out_reg_writeId    <= rd; // rd = rs - rt
+                                    out_reg_writeValue <= {1'b0, `DEVICE_ADDER, 32'd0}; // 等待 Adder 的输出
+                                end
+                                `FUNC_JR: begin
+                                    out_buzy           <= 1;
+                                    out_device         <= `DEVICE_JMP;
+                                    out_algorithm      <= `JMP_ALGO_JMP;
+                                    out_dm_write       <= 0;
+                                    out_dm_sign        <= 0;
+                                    out_dm_offset      <= 0;
+                                    out_targetAddr     <= reg_readA;
+                                    out_valueA         <= 0;
+                                    out_valueB         <= 0;
+                                    out_reg_write      <= 0;
+                                    out_reg_writeId    <= 0;
+                                    out_reg_writeValue <= 0;
+                                end
+                            endcase
+                        end
+                        `OP_SW: begin
+                            out_buzy           <= 1;
+                            out_device         <= `DEVICE_DM;
+                            out_algorithm      <= `DM_ALGO_WORD;
+                            out_dm_write       <= 1;
+                            out_dm_sign        <= 0;
+                            out_dm_offset      <= {{16{imm16[15]}}, imm16};
+                            out_targetAddr     <= reg_readA;
+                            out_valueA         <= 0;
+                            out_valueB         <= 0;
+                            out_reg_write      <= 0;
+                            out_reg_writeId    <= 0;
+                            out_reg_writeValue <= 0;
+                        end
+                        // TODO: 在此处添加未完成译码的指令
+                        `OP_ORI: begin
+                            
+                        end
+                        default: begin
+                            out_buzy <= 0; // 译码失败，不发射指令
+                        end
                     endcase
                 end
             end
@@ -955,6 +1146,460 @@ module Ctrl (
 endmodule
 
 
+// -------------------- 通用数据总线控制器 -------------------- //
+module Cdb (
+    // 来自加法器的端口
+    input        adder_buzy,
+    input [2 :0] adder_device,
+    input [31:0] adder_value,
+
+    // 来自逻辑运算器的端口
+    input        logic_buzy,
+    input [2 :0] logic_device,
+    input [31:0] logic_value,
+
+    // 来自数据存储器的端口
+    input        dm_buzy,
+    input [2 :0] dm_device,
+    input [31:0] dm_value,
+
+    // 来自跳转模块的端口
+    input        jmp_buzy,
+    input [2 :0] jmp_device,
+    input [31:0] jmp_value,
+
+    // 来自计算机基本结构的端口
+    input clk,
+    input rst,
+
+    // 输出端口
+    output reg        out_buzy,
+    output reg [2 :0] out_device,
+    output reg [31:0] out_value
+);
+    always @(posedge clk) begin // CDB 逻辑
+        if(rst) begin
+            out_buzy   <= 0;
+            out_device <= 0;
+            out_value  <= 0;
+        end
+        else begin
+            if(out_buzy) begin
+                out_buzy   <= 0;
+                out_device <= 0;
+                out_value  <= 0; //! CDB 数据只保持一个时钟周期
+            end
+            else begin // 如果 CDB 上没有数据，试图从执行部件读取
+                if(adder_buzy) begin
+                    out_buzy   <= 1;
+                    out_device <= adder_device;
+                    out_value  <= adder_value;
+                end else
+                if(logic_buzy) begin
+                    out_buzy   <= 1;
+                    out_device <= logic_device;
+                    out_value  <= logic_value;
+                end else
+                if(dm_buzy) begin
+                    out_buzy   <= 1;
+                    out_device <= dm_device;
+                    out_value  <= dm_value;
+                end else
+                if(jmp_buzy) begin
+                    out_buzy   <= 1;
+                    out_device <= jmp_device;
+                    out_value  <= jmp_value;
+                end
+            end
+        end
+    end
+endmodule
+
+
+// -------------------- MIPS 总电路图 -------------------- //
+module mips (
+    // 以下端口来自 testbench
+    input clk,
+    input rst
+);
+    // 以下三根线用于耦合 CDB 到对应的元件
+    wire        cdb_buzy;
+    wire [2 :0] cdb_device;
+    wire [31:0] cdb_value;
+
+    // 以下三根线为 IFU 的输出数据
+    wire [31:0] ifu_pc;
+    wire        ifu_ir_buzy;
+    wire [31:0] ifu_ir;
+
+    // 以下数据为 Ctrl 译码器输出
+    wire        ctrl_out_buzy      ; //! 发射前一定要判断能够发射
+    wire [2 :0] ctrl_out_device    ;
+    wire [1 :0] ctrl_out_algorithm ;
+    wire [35:0] ctrl_out_valueA    ;
+    wire [35:0] ctrl_out_valueB    ;
+    wire        ctrl_out_dm_write  ;
+    wire        ctrl_out_dm_sign   ;
+    wire [15:0] ctrl_out_dm_offset ; // 带 dm 的输出位只会被送给输入输出缓冲站
+    wire [35:0] ctrl_out_targetAddr;  //! 要么是某个寄存器的值，要么可以通过 PC+4 与常量算出
+
+    // 以下数据为加法保留站输出
+    wire        adder_in_out_buzy     ;
+    wire        adder_in_out_ready    ;
+    wire [1 :0] adder_in_out_algorithm;
+    wire [35:0] adder_in_out_valueA   ;
+    wire [35:0] adder_in_out_valueB   ;
+
+    // 以下数据来自加法输出缓冲器
+    wire reg        adder_out_out_buzy  ;
+    wire reg [2 :0] adder_out_out_device;
+    wire reg [31:0] adder_out_out_value ;
+
+    // 以下数据为逻辑运算保留站输出
+    wire        logic_in_out_buzy     ;
+    wire        logic_in_out_ready    ;
+    wire [1 :0] logic_in_out_algorithm;
+    wire [35:0] logic_in_out_valueA   ;
+    wire [35:0] logic_in_out_valueB   ;
+
+    // 以下数据来自逻辑输出缓冲器
+    wire reg        logic_out_out_buzy  ;
+    wire reg [2 :0] logic_out_out_device;
+    wire reg [31:0] logic_out_out_value ;
+
+    // 以下数据来自 DM 输出
+    wire        dm_buffer_buzy;
+    wire        dm_out_buzy   ;
+    wire [2 :0] dm_out_device ;
+    wire [31:0] dm_out_value  ;
+
+    // 以下数据来自 Jmp 输出
+    wire        jmp_buffer_buzy;
+    wire        jmp_out_buzy   ;
+    wire [2 :0] jmp_out_device ;
+    wire [31:0] jmp_out_value  ;
+
+    IFU U_IFU(
+        .cdb_buzy  (cdb_buzy  ), // 以下端口来自 CDB
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .ctrl_readIns(!(ctrl_out_buzy || jmp_buffer_buzy || jmp_out_buzy || (cdb_buzy && cdb_device == `DEVICE_JMP))), 
+        .clk(clk), //! ctrl_readIns = 指令缓冲器空 && JMP模块不工作 && CDB输出设备不是IFU
+        .rst(rst),
+        .nxt_buzy(ctrl_out_buzy), // 这个信号是从 ctrl 来
+        .pc      (ifu_pc       ), // 下一条指令地址
+        .ir_buzy (ifu_ir_buzy  ),
+        .ir      (ifu_ir       )  // 当前指令的内容
+    );
+    
+    Ctrl U_Ctrl(
+        .cdb_buzy  (cdb_buzy  ), // 以下端口来自 CDB
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),        
+        .pc     (ifu_pc     ), // 以下端口来自前驱设备
+        .ir_buzy(ifu_ir_buzy),
+        .ir     (ifu_ir     ),
+        .clk(clk), // 计算机基本结构
+        .rst(rst),
+        .nxt_adder_buzy(adder_in_out_buzy || adder_out_out_buzy), // 以下端口来自后继设备，译码器需要通过判断后继设备是否忙从而决定指令能否发射
+        .nxt_logic_buzy(logic_in_out_buzy || logic_out_out_buzy),
+        .nxt_dm_buzy   (   dm_buffer_buzy ||        dm_out_buzy), //! 请注意，这里的 buzy 不只是 BufferIn，而是 BufferIn || BufferOut
+        .nxt_jmp_buzy  (  jmp_buffer_buzy ||       jmp_out_buzy),
+        .out_buzy      (ctrl_out_buzy      ), // 以下端口为输出的所有控制信号 //! 发射前一定要判断能够发射
+        .out_device    (ctrl_out_device    ),
+        .out_algorithm (ctrl_out_algorithm ),
+        .out_valueA    (ctrl_out_valueA    ),
+        .out_valueB    (ctrl_out_valueB    ),
+        .out_dm_write  (ctrl_out_dm_write  ),
+        .out_dm_sign   (ctrl_out_dm_sign   ),
+        .out_dm_offset (ctrl_out_dm_offset ), // 带 dm 的输出位只会被送给输入输出缓冲站
+        .out_targetAddr(ctrl_out_targetAddr)  //! 转移目标地址要么是某个寄存器的值，要么可以通过 PC+4 与常量算出
+    );
+
+    BufferIn U_AdderBufferIn(
+        .in_hasInput (ctrl_out_buzy     ), // 以下四个端口数据来自 InsBuffer(指令发射缓冲寄存器)
+        .in_device   (ctrl_out_device   ), 
+        .in_algorithm(ctrl_out_algorithm), 
+        .in_valueA   (ctrl_out_valueA   ), 
+        .in_valueB   (ctrl_out_valueB   ), 
+        .device_now  (`DEVICE_ADDER     ),  //? 这个端口一定从常数输入
+        .cdb_buzy  (cdb_buzy  ), // 以下三个端口来自 CDB
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .clk(clk),
+        .rst(rst),
+        .nxt_buzy     (adder_out_out_buzy    ), //! 来自加法结果暂存器
+        .out_buzy     (adder_in_out_buzy     ),
+        .out_ready    (adder_in_out_ready    ),
+        .out_algorithm(adder_in_out_algorithm),
+        .out_valueA   (adder_in_out_valueA   ),
+        .out_valueB   (adder_in_out_valueB   ) 
+    );
+
+    AdderBufferOut U_AdderBufferOut(
+        .in_buzy     (adder_in_out_buzy     ), // 以下五个端口来自加法器保留站
+        .in_ready    (adder_in_out_ready    ),
+        .in_algorithm(adder_in_out_algorithm),
+        .in_valueA   (adder_in_out_valueA   ),
+        .in_valueB   (adder_in_out_valueB   ),
+        .clk(clk), // 以下端口来自计算机基本框架
+        .rst(rst),
+        .cdb_buzy(cdb_buzy), // 以下端口来自后继设备 (CDB 是暂存器的后继设备)
+        .out_buzy   (adder_out_out_buzy  ), // 输出端口
+        .out_device (adder_out_out_device),
+        .out_value  (adder_out_out_value ) 
+    );
+
+    BufferIn U_LogicBufferIn(
+        .in_hasInput (ctrl_out_buzy     ), // 以下四个端口数据来自 InsBuffer(指令发射缓冲寄存器)
+        .in_device   (ctrl_out_device   ), 
+        .in_algorithm(ctrl_out_algorithm), 
+        .in_valueA   (ctrl_out_valueA   ), 
+        .in_valueB   (ctrl_out_valueB   ), 
+        .device_now  (`DEVICE_LOGIC     ),  //? 这个端口一定从常数输入
+        .cdb_buzy  (cdb_buzy  ), // 以下三个端口来自 CDB
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .clk(clk),
+        .rst(rst),
+        .nxt_buzy     (logic_out_out_buzy    ), //! 来自逻辑运算结果暂存器
+        .out_buzy     (logic_in_out_buzy     ),
+        .out_ready    (logic_in_out_ready    ),
+        .out_algorithm(logic_in_out_algorithm),
+        .out_valueA   (logic_in_out_valueA   ),
+        .out_valueB   (logic_in_out_valueB   ) 
+    );
+
+    LogicBufferOut U_LogicBufferOut(
+        .in_buzy     (logic_in_out_buzy     ), // 以下五个端口来自逻辑运算保留站
+        .in_ready    (logic_in_out_ready    ),
+        .in_algorithm(logic_in_out_algorithm),
+        .in_valueA   (logic_in_out_valueA   ),
+        .in_valueB   (logic_in_out_valueB   ),
+        .clk(clk), // 以下端口来自计算机基本框架
+        .rst(rst),
+        .dvc_adder_buzy(adder_out_out_buzy  ), //! 逻辑与加法的不同之处是需要判断一个更优先的设备
+        .cdb_buzy      (cdb_buzy            ), // 以下端口来自后继设备 (CDB 是暂存器的后继设备)
+        .out_buzy      (logic_out_out_buzy  ), // 输出端口
+        .out_device    (logic_out_out_device),
+        .out_value     (logic_out_out_value ) 
+    );
+
+    DataMemory U_DataMemory(
+        .in_hasInput (ctrl_out_buzy     ), // 以下端口来自 InsBuffer (指令发射缓冲寄存器)
+        .in_device   (ctrl_out_device   ),
+        .in_algorithm(ctrl_out_algorithm), 
+        .in_valueA   (ctrl_out_valueA   ), 
+        .in_valueB   (ctrl_out_valueB   ), 
+        .in_DM_write (ctrl_out_dm_write ), 
+        .in_DM_sign  (ctrl_out_dm_sign  ), 
+        .in_DM_offset(ctrl_out_dm_offset), 
+        .cdb_buzy  (cdb_buzy  ), // 以下三个端口数据来自 CDB(通用数据总线) //! 输入输出缓冲站也需要等待 CDB 中的数据
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .clk(clk), // 以下端口来自计算机基本框架
+        .rst(rst),
+        .dvc_adder_buzy(adder_out_out_buzy), // 以下端口来自后继设备 (CDB 是暂存器的后继设备)
+        .dvc_logic_buzy(logic_out_out_buzy), //! 存储器只有在加法器和逻辑运算器都不想占用 CDB 时才能工作
+        .buffer_buzy(dm_buffer_buzy), // 输出端口 
+        .out_buzy   (dm_out_buzy   ),
+        .out_device (dm_out_device ),
+        .out_value  (dm_out_value  ) 
+    );
+
+    Jmp U_Jmp(
+        .in_hasInput  (ctrl_out_buzy      ),
+        .in_device    (ctrl_out_device    ),
+        .in_targetAddr(ctrl_out_targetAddr),
+        .in_algorithm (ctrl_out_algorithm ),
+        .in_valueA    (ctrl_out_valueA    ),
+        .in_valueB    (ctrl_out_valueB    ),
+        .cdb_buzy  (cdb_buzy  ),
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+        .clk(clk),
+        .rst(rst),
+        .dvc_adder_buzy (adder_out_out_buzy),
+        .dvc_logic_buzy (logic_out_out_buzy),
+        .dvc_memory_buzy(dm_out_buzy       ), //! 跳转模块只有在没人想要占用 CDB 时才能占用 CDB
+        .buffer_buzy(jmp_buffer_buzy),
+        .out_buzy   (jmp_out_buzy   ),   
+        .out_device (jmp_out_device ), 
+        .out_value  (jmp_out_value  ) 
+    );
+
+    Cdb U_Cdb(
+        .adder_buzy  (adder_out_out_buzy  ), // 来自加法器的端口
+        .adder_device(adder_out_out_device),
+        .adder_value (adder_out_out_value ),
+        .logic_buzy  (logic_out_out_buzy  ), // 来自逻辑运算器的端口 
+        .logic_device(logic_out_out_device),
+        .logic_value (logic_out_out_value ),        
+        .dm_buzy   (dm_out_buzy   ), // 来自数据存储器的端口
+        .dm_device (dm_out_device ),
+        .dm_value  (dm_out_value  ),
+        .jmp_buzy  (jmp_out_buzy  ), // 来自跳转模块的端口
+        .jmp_device(jmp_out_device),
+        .jmp_value (jmp_out_value ),
+        .clk(clk),
+        .rst(rst),
+        .out_buzy  (cdb_buzy  ), // 输出端口
+        .out_device(cdb_device),
+        .out_value (cdb_value )
+    );
+endmodule
+
+
+// -------------------- 各个模块的模块测试激励 -------------------- //
+// SEEK testbench
+
+
+module tb_mips;
+    reg clk, rst; // 时钟与复位信号
+    always #1 clk = ~clk;
+
+    mips U_MIPS(
+        .clk(clk),
+        .rst(rst)
+    );
+
+    //输出波形
+    initial begin
+        $dumpfile("MIPS.vcd");
+        $dumpvars(0, tb_BufferIn);
+    end
+
+    initial begin
+        clk = 0;
+        rst = 1;
+        #2 rst = 0; // 清空并开始执行
+    end
+endmodule
+
+
+module tb_FetchCDB;
+    reg         cdb_buzy       ;
+    reg  [2 :0] cdb_device     ;
+    reg  [31:0] cdb_value      ;
+    reg  [35:0] buffer_value   ;
+    wire [35:0] buffer_newValue;
+
+    // 测试 FetchCDB 能否按照预期工作
+    FetchCDB U_FetchCDB(
+        .cdb_buzy        (cdb_buzy       ),
+        .cdb_device      (cdb_device     ),
+        .cdb_value       (cdb_value      ),
+        .buffer_value    (buffer_value   ),
+        .buffer_newValue (buffer_newValue)
+    );
+
+    // 输出波形
+    // initial begin
+    //     $dumpfile("FetchCDB.vcd");
+    //     $dumpvars(0, tb_FetchCDB);
+    // end
+
+    // 测试逻辑
+    initial begin
+        cdb_buzy     = 1;            // CDB 上 JMP 正在输出
+        cdb_device   = `DEVICE_JMP ; //
+        cdb_value    = 32'h12345678; // 输出 12345678H
+        buffer_value = {1'b0, `DEVICE_ADDER, 32'h00000000}; // 未就绪，设备不是我的
+        #20;
+        buffer_value = {1'b0, `DEVICE_JMP, 32'h00000000};   // 未就绪，设备是我的
+        #20;
+        buffer_value = {1'b1, `DEVICE_JMP, 32'h87654321};   // 已就绪，设备是我的
+        #20 $finish;
+    end
+endmodule
+
+
+module tb_BufferIn; // 对 BufferIn 模块进行测试
+    reg        in_hasInput ;
+    reg [2 :0] in_device   ;
+    reg [1 :0] in_algorithm;
+    reg [35:0] in_valueA   ;
+    reg [35:0] in_valueB   ;
+
+    reg        cdb_buzy  ;
+    reg [2 :0] cdb_device;
+    reg [31:0] cdb_value ;
+
+    reg clk, rst;
+    reg nxt_buzy;
+
+    wire        out_buzy     ;
+    wire        out_ready    ;
+    wire [1 :0] out_algorithm;
+    wire [35:0] out_valueA   ;
+    wire [35:0] out_valueB   ;
+
+    //输出波形
+    // initial begin
+    //     $dumpfile("BufferIn.vcd");
+    //     $dumpvars(0, tb_BufferIn);
+    // end
+
+    // 假设这是一个加法缓冲器
+    BufferIn U_BufferIn(
+        .in_hasInput  (in_hasInput ),
+        .in_device    (in_device   ),
+        .in_algorithm (in_algorithm),
+        .in_valueA    (in_valueA   ),
+        .in_valueB    (in_valueB   ),
+
+        .device_now(`DEVICE_ADDER),  //? 这个端口一定从常数输入
+        
+        .cdb_buzy  (cdb_buzy  ),
+        .cdb_device(cdb_device),
+        .cdb_value (cdb_value ),
+
+        .clk(clk),
+        .rst(rst),
+
+        .nxt_buzy(nxt_buzy),
+
+        .out_buzy     (out_buzy     ),
+        .out_ready    (out_ready    ),
+        .out_algorithm(out_algorithm),
+        .out_valueA   (out_valueA   ),
+        .out_valueB   (out_valueB   )
+    );
+
+    initial clk = 0;
+    always #1 clk = ~clk; // 设置时钟
+
+    initial begin
+        rst = 1;
+        #2 rst = 0; // 清空
+        #2;
+
+        in_hasInput  = 1;
+        in_device    = `DEVICE_LOGIC; // 不是输入到这个设备的
+        in_algorithm = `ADDER_ALGO_ADD;
+        in_valueA    = {1'b0, `DEVICE_DM, 32'd0};
+        in_valueB    = {1'b1, 3'd0, 32'd12345678};
+
+        cdb_buzy   = 0;
+        cdb_device = `DEVICE_DM;
+        cdb_value  = 87654321;
+
+        nxt_buzy = 1; // 由于设备不对，什么都不做
+        #2;
+        in_device = `DEVICE_ADDER; // 设备改对后读入指令
+        #2;
+        in_hasInput = 0; // 等待一个周期
+        #2;
+        cdb_buzy = 1; // 读入就绪的数据
+        #2;
+        cdb_buzy = 0; // 等待一个周期
+        #2;
+        nxt_buzy = 0; // 可以输出后，清空数据
+        #2;
+        #2 $finish;
+    end
+endmodule
+
+
 //! -------------------- 以下内容尚未完成 -------------------- //
-// MIPS 总电路图
 // testbench 激励文件
